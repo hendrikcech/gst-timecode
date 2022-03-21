@@ -56,8 +56,10 @@ enum
   PROP_LOCATION
 };
 
-static const char *logfile_columns = "ts\tlatency\n";
-static const char *fmt_string = "%s\t%ld\n";
+static const char *default_path = "/tmp/gsttime.csv";
+
+static const char *logfile_columns = "ts\tframe_nr\tlatency\ttime_s\ttime_p\tsec_offset\n";
+static const char *fmt_string = "%s\t%lu\t%ld\t%lu\t%lu\t%lu\n";
 
 /* the capabilities of the inputs and outputs.
  */
@@ -78,6 +80,7 @@ G_DEFINE_TYPE (Gsttimecodeparse, gst_timecodeparse, GST_TYPE_VIDEO_FILTER);
 GST_ELEMENT_REGISTER_DEFINE (timecodeparse, "timecodeparse", GST_RANK_NONE,
     GST_TYPE_TIMECODEPARSE);
 
+static gboolean gst_timecodeparse_src_event (GstBaseTransform * basetransform, GstEvent * event);
 static void gst_timecodeparse_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_timecodeparse_get_property (GObject * object,
@@ -104,8 +107,8 @@ gst_timecodeparse_class_init (GsttimecodeparseClass * klass)
   gobject_class->dispose = gst_timecodeparse_dispose;
 
   g_object_class_install_property (gobject_class, PROP_LOCATION,
-      g_param_spec_string ("logfile", "Logfile", "Path to log file",
-          "/tmp/gsttime.csv", G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE));
+      g_param_spec_string ("location", "Location", "Path to log file", default_path,
+                           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE));
 
   gst_element_class_set_details_simple (gstelement_class,
       "timecodeparse",
@@ -117,6 +120,9 @@ gst_timecodeparse_class_init (GsttimecodeparseClass * klass)
       gst_static_pad_template_get (&src_template));
   gst_element_class_add_pad_template (gstelement_class,
       gst_static_pad_template_get (&sink_template));
+
+  GST_BASE_TRANSFORM_CLASS (klass)->src_event =
+      GST_DEBUG_FUNCPTR (gst_timecodeparse_src_event);
 
   GST_VIDEO_FILTER_CLASS (klass)->transform_frame_ip =
       GST_DEBUG_FUNCPTR (gst_timecodeparse_transform_frame_ip);
@@ -133,8 +139,10 @@ gst_timecodeparse_class_init (GsttimecodeparseClass * klass)
 static void
 gst_timecodeparse_init (Gsttimecodeparse * filter)
 {
-  filter->logfile = NULL;
-  filter->logfile_path = NULL;
+  char *path = malloc(sizeof(default_path));
+  strcpy(path, default_path);
+  filter->logfile_path = path;
+  filter->logfile = g_fopen(filter->logfile_path, "w");
 }
 
 static void
@@ -142,10 +150,25 @@ gst_timecodeparse_dispose (GObject *object)
 {
   Gsttimecodeparse *filter = GST_TIMECODEPARSE (object);
   GST_INFO_OBJECT(filter, "Closing logfile");
-  if (filter->logfile != NULL)
-    fclose(filter->logfile);
-  if (filter->logfile_path != NULL)
-    g_free(filter->logfile_path);
+  g_free(filter->logfile_path);
+  fclose(filter->logfile);
+}
+
+static gboolean
+gst_timecodeparse_src_event (GstBaseTransform * basetransform, GstEvent * event)
+{
+  Gsttimecodeparse *overlay = GST_TIMECODEPARSE (basetransform);
+
+  if (GST_EVENT_TYPE (event) == GST_EVENT_LATENCY) {
+    GstClockTime latency = GST_CLOCK_TIME_NONE;
+    gst_event_parse_latency (event, &latency);
+    GST_INFO_OBJECT (overlay, "Latency is now %f ms (%lu ns)", latency/1e6, latency);
+  }
+
+  /* Chain up */
+  return
+      GST_BASE_TRANSFORM_CLASS (gst_timecodeparse_parent_class)->src_event
+      (basetransform, event);
 }
 
 static void
@@ -163,9 +186,7 @@ gst_timecodeparse_set_property (GObject * object, guint prop_id,
       fputs(logfile_columns, logfile_new);
       filter->logfile_path = path_new;
       filter->logfile = logfile_new;
-      if (path_old != NULL)
         g_free(path_old);
-      if (logfile_old != NULL)
         fclose(logfile_old);
       break;
     }
@@ -220,19 +241,38 @@ read_timestamp(int lineoffset, GstVideoFrame *frame, Gsttimecodeparse *overlay)
   uint x_pos = 1920 - 896;
   gint pxsize = 16; // 1
 
-  uint y_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[0]   + x_pos*8;
-  uint u_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[1]/2 + x_pos*4;
-  uint v_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[2]/2 + x_pos*4;
+  guint y_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[0]   + x_pos*8;
+  guint u_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[1]/2 + x_pos*4;
+  guint v_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[2]/2 + x_pos*4;
 
+  // Don't look at the first pixel of each bit-pixel but at the middle of it
+  y_offset += pxsize/2 * frame->info.stride[0];
+  u_offset += pxsize/2 * frame->info.stride[1]/2;
+  v_offset += pxsize/2 * frame->info.stride[2]/2;
+
+  guint u_sum = 0;
+  guint v_sum = 0;
   for (int bit = 0; bit < 64; bit++) {
-    // char y_value = y[bit * pxsize * 8 + 4];
-    guchar y_value = y[y_offset + bit * pxsize];
-    guchar u_value = u[u_offset + bit/2 * pxsize];
-    guchar v_value = v[v_offset + bit/2 * pxsize];
-    if ((y_value != 0 && y_value != 255) || u_value != 128 || v_value != 128) // corrupted
+    guchar y_value = y[y_offset + bit   * pxsize + pxsize/2];
+    guchar u_value = u[u_offset + bit/2 * pxsize + pxsize/2/2];
+    guchar v_value = v[v_offset + bit/2 * pxsize + pxsize/2/2];
+    u_sum += u_value;
+    v_sum += v_value;
+    GST_TRACE_OBJECT(overlay, "bit=%d: %u,%u,%u", bit, y_value, u_value, v_value);
+    /* if ((y_value != 0 && y_value != 255) || u_value != 128 || v_value != 128) // corrupted */
+    /*   return 0; */
+    if (y_value > 20 && y_value < 230) {
+      GST_TRACE_OBJECT(overlay, "ts %d discarded: y_value=%u", lineoffset, y_value);
       return 0;
-    // GST_TRACE_OBJECT(overlay, "bit=%d: %u,%u,%u", bit, y_value, u_value, v_value);
-    timestamp |= (y_value == 255) ?  (guint64) 1 << (63 - bit) : 0;
+    }
+
+    timestamp |= (y_value >= 230) ?  (guint64) 1 << (63 - bit) : 0;
+  }
+
+  if ((u_sum / 64 < 100) || (u_sum /64 > 156) || (v_sum / 64 < 100) || (v_sum /64 > 156)) {
+      GST_TRACE_OBJECT(overlay, "ts %d discarded: avg u_sum=%u, avg v_sum=%u",
+                       lineoffset, u_sum/64, v_sum/64);
+      return 0;
   }
 
   return timestamp;
@@ -244,8 +284,9 @@ typedef struct {
   GstClockTime running_time;
   GstClockTime clock_time;
   GstClockTime render_time;
-  unsigned long sec_offset;
-  unsigned long render_realtime;
+  guint64 sec_offset;
+  guint64 render_realtime;
+  guint64 frame_nr;
 } Timestamps;
 
 /* this function does the actual processing
@@ -276,36 +317,44 @@ gst_timecodeparse_transform_frame_ip (GstVideoFilter * filter, GstVideoFrame * f
   /* GstClockTime clock_time = running_time + gst_element_get_base_time (GST_ELEMENT (overlay)); */
 
   Timestamps timestamps;
-  timestamps.buffer_time = read_timestamp (0, frame, overlay);
-  timestamps.stream_time = read_timestamp (1, frame, overlay);
-  timestamps.running_time = read_timestamp (2, frame, overlay);
-  timestamps.clock_time = read_timestamp (3, frame, overlay);
-  timestamps.render_time = read_timestamp (4, frame, overlay);
+  /* timestamps.buffer_time = read_timestamp (0, frame, overlay); */
+  /* timestamps.stream_time = read_timestamp (1, frame, overlay); */
+  /* timestamps.running_time = read_timestamp (2, frame, overlay); */
+  /* timestamps.clock_time = read_timestamp (3, frame, overlay); */
+  /* timestamps.render_time = read_timestamp (4, frame, overlay); */
   timestamps.sec_offset = read_timestamp (5, frame, overlay);
   timestamps.render_realtime = read_timestamp (6, frame, overlay);
+  timestamps.frame_nr = read_timestamp (7, frame, overlay);
 
-  GST_DEBUG_OBJECT (overlay, "Read timestamps: buffer_time = %" GST_TIME_FORMAT
-      ", stream_time = %" GST_TIME_FORMAT ", running_time = %" GST_TIME_FORMAT
-      ", clock_time = %" GST_TIME_FORMAT ", render_time = %" GST_TIME_FORMAT
-      ", render_realtime = %lu",
-      GST_TIME_ARGS(timestamps.buffer_time),
-      GST_TIME_ARGS(timestamps.stream_time),
-      GST_TIME_ARGS(timestamps.running_time),
-      GST_TIME_ARGS(timestamps.clock_time),
-      GST_TIME_ARGS(timestamps.render_time),
-      timestamps.render_realtime);
+  /* GST_LOG_OBJECT (overlay, "Read timestamps: buffer_time = %" GST_TIME_FORMAT */
+  /*     ", stream_time = %" GST_TIME_FORMAT ", running_time = %" GST_TIME_FORMAT */
+  /*     ", clock_time = %" GST_TIME_FORMAT ", render_time = %" GST_TIME_FORMAT */
+  /*     ", render_realtime = %lu", */
+  /*     GST_TIME_ARGS(timestamps.buffer_time), */
+  /*     GST_TIME_ARGS(timestamps.stream_time), */
+  /*     GST_TIME_ARGS(timestamps.running_time), */
+  /*     GST_TIME_ARGS(timestamps.clock_time), */
+  /*     GST_TIME_ARGS(timestamps.render_time), */
+  /*     timestamps.render_realtime); */
 
   struct timeval tv;
   gettimeofday(&tv,NULL);
-  unsigned long now = 1000000 * (tv.tv_sec - timestamps.sec_offset) + tv.tv_usec;
-
-  long latency = now - timestamps.render_realtime;
+  guint64 now = 1000000 * (tv.tv_sec - timestamps.sec_offset) + tv.tv_usec;
   gchar *ts = get_ts();
-
+  long latency = -1;
+  if (timestamps.sec_offset == 0 || timestamps.render_realtime == 0) {
+    GST_DEBUG_OBJECT(overlay, "Failed to read sec_offset or render_realtime");
+  } else {
+     latency = now - timestamps.render_realtime;
+  }
+  if (latency > 30*1e6 || latency < -1) {
+    GST_DEBUG_OBJECT(overlay, "Discard unlikely latency (<0s or >30s): %ld", latency);
+    latency = -1;
+  }
   #define LOG_LINE_LEN 256
   char log_line[LOG_LINE_LEN] = {0};
-  snprintf(log_line, LOG_LINE_LEN, fmt_string, ts, latency);
-  GST_INFO_OBJECT (overlay, fmt_string, ts, latency);
+  snprintf (log_line, LOG_LINE_LEN, fmt_string, ts, timestamps.frame_nr, latency, timestamps.render_realtime, now, timestamps.sec_offset);
+  GST_LOG_OBJECT (overlay,          fmt_string, ts, timestamps.frame_nr, latency, timestamps.render_realtime, now, timestamps.sec_offset);
   fputs(log_line, overlay->logfile);
   g_free(ts);
 

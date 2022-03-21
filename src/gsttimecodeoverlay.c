@@ -37,8 +37,6 @@
 #endif
 
 #include <gst/gst.h>
-/* #include <gst/base/base.h> */
-/* #include <gst/controller/controller.h> */
 #include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
 #include <sys/time.h>
@@ -74,12 +72,6 @@ static GstStaticPadTemplate src_template = GST_STATIC_PAD_TEMPLATE ("src",
 G_DEFINE_TYPE (Gsttimecodeoverlay, gst_timecodeoverlay, GST_TYPE_VIDEO_FILTER);
 GST_ELEMENT_REGISTER_DEFINE (timecodeoverlay, "timecodeoverlay", GST_RANK_NONE,
     GST_TYPE_TIMECODEOVERLAY);
-/* G_DEFINE_TYPE_WITH_CODE (Gsttimecodeoverlay, gst_timecodeoverlay, 0, */
-/*   GST_DEBUG_CATEGORY_INIT (gst_timecodeoverlay_debug_category, "timecodeoverlay", 0, */
-  /* "debug category for timecodeoverlay element")); */
-/* G_DEFINE_TYPE (Gsttimecodeoverlay, gst_timecodeoverlay, GST_TYPE_VIDEO_FILTER); */
-/* GST_ELEMENT_REGISTER_DEFINE (timecodeoverlay, "timecodeoverlay", GST_RANK_NONE, */
-/*     GST_TYPE_TIMECODEOVERLAY); */
 
 static void gst_timecodeoverlay_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec);
@@ -138,20 +130,22 @@ gst_timecodeoverlay_init (Gsttimecodeoverlay * overlay)
   struct timeval tv;
   gettimeofday(&tv,NULL);
   overlay->sec_offset = tv.tv_sec;
+  overlay->frame_nr = 0;
   overlay->latency = GST_CLOCK_TIME_NONE;
 }
 
 static gboolean
 gst_timecodeoverlay_src_event (GstBaseTransform * basetransform, GstEvent * event)
 {
-  Gsttimecodeoverlay *filter = GST_TIMECODEOVERLAY (basetransform);
+  Gsttimecodeoverlay *overlay = GST_TIMECODEOVERLAY (basetransform);
 
   if (GST_EVENT_TYPE (event) == GST_EVENT_LATENCY) {
     GstClockTime latency = GST_CLOCK_TIME_NONE;
     gst_event_parse_latency (event, &latency);
-    GST_OBJECT_LOCK (filter);
-    filter->latency = latency;
-    GST_OBJECT_UNLOCK (filter);
+    GST_OBJECT_LOCK (overlay);
+    overlay->latency = latency;
+    GST_OBJECT_UNLOCK (overlay);
+    GST_INFO_OBJECT (overlay, "Latency is now %f ms (%lu ns)", latency/1e6, latency);
   }
 
   /* Chain up */
@@ -194,13 +188,13 @@ draw_timestamp(int lineoffset, GstClockTime timestamp, Gsttimecodeoverlay *overl
   guchar *v = y + frame->info.offset[2];
 
   // TODO: Should be properties
-  uint y_pos = 52;
-  uint x_pos = 1920 - 896;
-  gint pxsize = 16; // 1
+  guint y_pos = 52;
+  guint x_pos = 1920 - 896;
+  guint pxsize = 16; // 1
 
-  uint y_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[0]   + x_pos*8;
-  uint u_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[1]/2 + x_pos*4;
-  uint v_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[2]/2 + x_pos*4;
+  guint y_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[0]   + x_pos*8;
+  guint u_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[1]/2 + x_pos*4;
+  guint v_offset = (y_pos + lineoffset * pxsize) * frame->info.stride[2]/2 + x_pos*4;
 
   for (int line = 0; line < pxsize; line++) {
     if (line % 2 == 0) {
@@ -222,42 +216,42 @@ gst_timecodeoverlay_transform_frame_ip (GstVideoFilter * filter, GstVideoFrame *
 {
   Gsttimecodeoverlay *overlay = GST_TIMECODEOVERLAY (filter);
 
-  GST_DEBUG_OBJECT (overlay, "transform_frame_ip");
-
   GstClockTime buffer_time = GST_BUFFER_TIMESTAMP (frame->buffer);
 
   if (!GST_CLOCK_TIME_IS_VALID (buffer_time)) {
-    GST_DEBUG_OBJECT (filter, "Can't draw timestamps: buffer timestamp is invalid");
+    GST_DEBUG_OBJECT (overlay, "Can't draw timestamps: buffer timestamp is invalid");
     return GST_FLOW_OK;
   }
 
   if (frame->info.stride[0] < (8 * frame->info.finfo->pixel_stride[0] * 64)) {
-    GST_WARNING_OBJECT (filter, "Can't draw timestamps: video-frame is to narrow");
+    GST_WARNING_OBJECT (overlay, "Can't draw timestamps: video-frame is to narrow");
     return GST_FLOW_OK;
   }
 
-  GstSegment *segment = &GST_BASE_TRANSFORM (overlay)->segment;
-  GstClockTime stream_time = gst_segment_to_stream_time (segment, GST_FORMAT_TIME, buffer_time);
-  GstClockTime running_time = gst_segment_to_running_time (segment, GST_FORMAT_TIME, buffer_time);
-  GstClockTime clock_time = running_time + gst_element_get_base_time (GST_ELEMENT (overlay));
+  /* GstSegment *segment = &GST_BASE_TRANSFORM (overlay)->segment; */
+  /* GstClockTime stream_time = gst_segment_to_stream_time (segment, GST_FORMAT_TIME, buffer_time); */
+  /* GstClockTime running_time = gst_segment_to_running_time (segment, GST_FORMAT_TIME, buffer_time); */
+  /* GstClockTime clock_time = running_time + gst_element_get_base_time (GST_ELEMENT (overlay)); */
 
-  GstClockTime latency = overlay->latency;
-  GstClockTime render_time = clock_time;
-  if (GST_CLOCK_TIME_IS_VALID (latency))
-    render_time = clock_time + latency;
+  /* GstClockTime latency = overlay->latency; */
+  /* GstClockTime render_time = clock_time; */
+  /* if (GST_CLOCK_TIME_IS_VALID (latency)) */
+  /*   render_time = clock_time + latency; */
 
-  draw_timestamp (0, buffer_time, overlay, frame);
-  draw_timestamp (1, stream_time, overlay, frame);
-  draw_timestamp (2, running_time, overlay, frame);
-  draw_timestamp (3, clock_time, overlay, frame);
-  draw_timestamp (4, render_time, overlay, frame);
+  /* draw_timestamp (0, buffer_time, overlay, frame); */
+  /* draw_timestamp (1, stream_time, overlay, frame); */
+  /* draw_timestamp (2, running_time, overlay, frame); */
+  /* draw_timestamp (3, clock_time, overlay, frame); */
+  /* draw_timestamp (4, render_time, overlay, frame); */
 
   draw_timestamp(5, overlay->sec_offset, overlay, frame);
 
   struct timeval tv;
   gettimeofday(&tv,NULL);
-  unsigned long time_ms = 1000000 * (tv.tv_sec - overlay->sec_offset) + tv.tv_usec;
+  guint64 time_ms = 1000000 * (tv.tv_sec - overlay->sec_offset) + tv.tv_usec;
   draw_timestamp(6, time_ms, overlay, frame);
+
+  draw_timestamp(7, overlay->frame_nr++, overlay, frame);
 
   return GST_FLOW_OK;
 }

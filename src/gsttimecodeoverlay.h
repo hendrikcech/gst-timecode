@@ -36,7 +36,8 @@ struct _Gsttimecodeoverlay {
   GstVideoFilter element;
 
   GstClockTime latency;
-  long int sec_offset;
+  gint64 sec_offset;
+  gint64 frame_nr;
 };
 
 G_END_DECLS
