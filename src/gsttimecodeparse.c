@@ -56,7 +56,7 @@ enum
   PROP_LOCATION
 };
 
-static const char *default_path = "/tmp/gsttime.csv";
+static const char *default_path = "/tmp/gsttime_rcvr.csv";
 
 static const char *logfile_columns = "ts\tframe_nr\tlatency\ttime_s\ttime_p\tsec_offset\n";
 static const char *fmt_string = "%s\t%lu\t%ld\t%lu\t%lu\t%lu\n";
@@ -143,6 +143,10 @@ gst_timecodeparse_init (Gsttimecodeparse * filter)
   strcpy(path, default_path);
   filter->logfile_path = path;
   filter->logfile = g_fopen(filter->logfile_path, "w");
+  if (!filter->logfile) {
+    GST_ERROR_OBJECT (filter, "Failed opening logfile at %s", filter->logfile_path);
+    return;
+  }
 }
 
 static void
@@ -151,7 +155,8 @@ gst_timecodeparse_dispose (GObject *object)
   Gsttimecodeparse *filter = GST_TIMECODEPARSE (object);
   GST_INFO_OBJECT(filter, "Closing logfile");
   g_free(filter->logfile_path);
-  fclose(filter->logfile);
+  if (filter->logfile)
+    fclose(filter->logfile);
 }
 
 static gboolean
@@ -183,10 +188,15 @@ gst_timecodeparse_set_property (GObject * object, guint prop_id,
       FILE *logfile_old = filter->logfile;
       gchar *path_new = g_value_dup_string (value);
       FILE *logfile_new = g_fopen(path_new, "w");
+      if (!logfile_new) {
+        GST_ERROR_OBJECT (filter, "Failed opening logfile at %s", path_new);
+        return;
+      }
       fputs(logfile_columns, logfile_new);
       filter->logfile_path = path_new;
       filter->logfile = logfile_new;
-        g_free(path_old);
+      g_free(path_old);
+      if (logfile_old)
         fclose(logfile_old);
       break;
     }

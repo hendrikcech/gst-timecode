@@ -40,6 +40,8 @@
 #include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
 #include <sys/time.h>
+#include <time.h>
+#include <glib/gstdio.h>
 
 #include "gsttimecodeoverlay.h"
 
@@ -50,8 +52,14 @@ GST_DEBUG_CATEGORY_STATIC (gst_timecodeoverlay_debug);
 
 enum
 {
-  PROP_0
+  PROP_0,
+  PROP_LOCATION
 };
+
+
+static const char *default_path = "/tmp/gsttime_sndr.csv";
+static const char *logfile_columns = "ts\tframe_nr\ttime_s\tsec_offset\n";
+static const char *fmt_string = "%s\t%lu\t%lu\t%lu\n";
 
 /* the capabilities of the inputs and outputs.
  */
@@ -73,6 +81,7 @@ G_DEFINE_TYPE (Gsttimecodeoverlay, gst_timecodeoverlay, GST_TYPE_VIDEO_FILTER);
 GST_ELEMENT_REGISTER_DEFINE (timecodeoverlay, "timecodeoverlay", GST_RANK_NONE,
     GST_TYPE_TIMECODEOVERLAY);
 
+static void gst_timecodeoverlay_dispose (GObject *object);
 static void gst_timecodeoverlay_set_property (GObject * object,
     guint prop_id, const GValue * value, GParamSpec * pspec);
 static void gst_timecodeoverlay_get_property (GObject * object,
@@ -96,6 +105,12 @@ gst_timecodeoverlay_class_init (GsttimecodeoverlayClass * klass)
 
   gobject_class->set_property = gst_timecodeoverlay_set_property;
   gobject_class->get_property = gst_timecodeoverlay_get_property;
+
+  gobject_class->dispose = gst_timecodeoverlay_dispose;
+
+  g_object_class_install_property (gobject_class, PROP_LOCATION,
+      g_param_spec_string ("location", "Location", "Path to log file", default_path,
+                           G_PARAM_READWRITE | GST_PARAM_CONTROLLABLE));
 
   gst_element_class_set_details_simple (gstelement_class,
       "timecodeoverlay",
@@ -132,6 +147,25 @@ gst_timecodeoverlay_init (Gsttimecodeoverlay * overlay)
   overlay->sec_offset = tv.tv_sec;
   overlay->frame_nr = 0;
   overlay->latency = GST_CLOCK_TIME_NONE;
+
+  char *path = malloc(sizeof(default_path));
+  strcpy(path, default_path);
+  overlay->logfile_path = path;
+  overlay->logfile = g_fopen(overlay->logfile_path, "w");
+  if (!overlay->logfile) {
+    GST_ERROR_OBJECT (overlay, "Failed opening logfile at %s", overlay->logfile_path);
+    return;
+  }
+}
+
+static void
+gst_timecodeoverlay_dispose (GObject *object)
+{
+  Gsttimecodeoverlay *filter = GST_TIMECODEOVERLAY (object);
+  GST_INFO_OBJECT(filter, "Closing logfile");
+  g_free(filter->logfile_path);
+  if (filter->logfile)
+    fclose(filter->logfile);
 }
 
 static gboolean
@@ -158,9 +192,26 @@ static void
 gst_timecodeoverlay_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
-  // Gsttimecodeoverlay *overlay = GST_TIMECODEOVERLAY (object);
+  Gsttimecodeoverlay *filter = GST_TIMECODEOVERLAY (object);
 
   switch (prop_id) {
+    case PROP_LOCATION: {
+      gchar *path_old = filter->logfile_path;
+      FILE *logfile_old = filter->logfile;
+      gchar *path_new = g_value_dup_string (value);
+      FILE *logfile_new = g_fopen(path_new, "w");
+      if (!logfile_new) {
+        GST_ERROR_OBJECT (filter, "Failed opening logfile at %s", path_new);
+        return;
+      }
+      fputs(logfile_columns, logfile_new);
+      filter->logfile_path = path_new;
+      filter->logfile = logfile_new;
+      g_free(path_old);
+      if (logfile_old)
+        fclose(logfile_old);
+      break;
+    }
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -171,13 +222,32 @@ static void
 gst_timecodeoverlay_get_property (GObject * object, guint prop_id,
     GValue * value, GParamSpec * pspec)
 {
-  // Gsttimecodeoverlay *overlay = GST_TIMECODEOVERLAY (object);
+  Gsttimecodeoverlay *filter = GST_TIMECODEOVERLAY (object);
 
   switch (prop_id) {
+    case PROP_LOCATION:
+      g_value_set_string (value, filter->logfile_path);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+}
+
+static gchar
+*get_ts()
+{
+  GDateTime *dt = g_date_time_new_now_utc();
+  if (dt == NULL)
+    return NULL;
+  gchar *ts = g_date_time_format(dt, "%Y-%m-%d %H:%M:%S");
+  int ms = g_date_time_get_microsecond(dt);
+  int size = sizeof("2011-10-08 07:07:09.000000Z");
+  char *buf = malloc(size);
+  g_snprintf(buf, size, "%s.%06dZ", ts, ms);
+  g_free(ts);
+  g_date_time_unref(dt);
+  return buf;
 }
 
 static void
@@ -243,14 +313,22 @@ gst_timecodeoverlay_transform_frame_ip (GstVideoFilter * filter, GstVideoFrame *
   /* draw_timestamp (2, running_time, overlay, frame); */
   /* draw_timestamp (3, clock_time, overlay, frame); */
   /* draw_timestamp (4, render_time, overlay, frame); */
-
-  draw_timestamp(5, overlay->sec_offset, overlay, frame);
-
   struct timeval tv;
   gettimeofday(&tv,NULL);
   guint64 time_ms = 1000000 * (tv.tv_sec - overlay->sec_offset) + tv.tv_usec;
-  draw_timestamp(6, time_ms, overlay, frame);
 
+  gchar *ts = get_ts();
+
+
+  #define LOG_LINE_LEN 256
+  char log_line[LOG_LINE_LEN] = {0};
+  snprintf (log_line, LOG_LINE_LEN, fmt_string, ts, overlay->frame_nr, time_ms, overlay->sec_offset);
+  GST_LOG_OBJECT (overlay,          fmt_string, ts, overlay->frame_nr, time_ms, overlay->sec_offset);
+  fputs(log_line, overlay->logfile);
+  g_free(ts);
+
+  draw_timestamp(5, overlay->sec_offset, overlay, frame);
+  draw_timestamp(6, time_ms, overlay, frame);
   draw_timestamp(7, overlay->frame_nr++, overlay, frame);
 
   return GST_FLOW_OK;

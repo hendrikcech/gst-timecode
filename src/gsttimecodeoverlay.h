@@ -35,9 +35,12 @@ G_DECLARE_FINAL_TYPE (Gsttimecodeoverlay, gst_timecodeoverlay,
 struct _Gsttimecodeoverlay {
   GstVideoFilter element;
 
+  FILE *logfile;
+  gchar *logfile_path;
+
   GstClockTime latency;
-  gint64 sec_offset;
-  gint64 frame_nr;
+  guint64 sec_offset;
+  guint64 frame_nr;
 };
 
 G_END_DECLS
