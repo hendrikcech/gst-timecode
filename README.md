@@ -5,7 +5,7 @@ gst-timecode
 
 The GStreamer element adds time information to each frame that passes through it. This allows the calculation of the playback latency. The element modifies raw I420 buffers and therefore typically needs to be placed before an encoder / after a decoder.
 
-The lines encode 64-bit integers and contain (frame top to bottom):
+The lines encode 64-bit integers and contain (from top to bottom):
 * `sec_offset`: the UNIX time at the beginning of the video playback (does not change)
 * `ts`: the microseconds since `sec_offset` 
 * `frame_nr`: the frame nr, starting at 0
@@ -14,10 +14,13 @@ The GStreamer element `timecodeoverlay` adds these timestamps to each frame, whi
 
 Both elements expect a parameter `logfile` that contains the path where information about each frame is written to.
 
+This code was written as part of an adaptive video delivery pipeline that was published at the ACM Internet Measurement Conference (ACM IMC) 2022: [Analyzing Real-time Video Delivery over Cellular Networks for Remote Piloting Aerial Vehicles](https://doi.org/10.1145/3517745.3561465).
+Related material is available at [hendrikcech/imc22-remote-piloting](https://github.com/hendrikcech/imc22-remote-piloting).
+
 # Sample output
 ## Sender log output
 ```
-ts      frame_nr        time_s  sec_offset
+ts                           frame_nr   time_s  sec_offset
 2022-03-23 11:16:24.540308Z     0       540299  1648034184
 2022-03-23 11:16:24.568275Z     1       568272  1648034184
 2022-03-23 11:16:24.586687Z     2       586681  1648034184
@@ -32,7 +35,7 @@ ts      frame_nr        time_s  sec_offset
 ## Player log output
 
 ```
-ts      frame_nr        latency time_s  time_p  sec_offset
+ts                           frame_nr   latency time_s  time_p  sec_offset
 2022-03-23 11:16:25.863182Z     36      178256  1684924 1863180 1648034184
 2022-03-23 11:16:25.896003Z     37      177611  1718391 1896002 1648034184
 2022-03-23 11:16:25.929350Z     38      177662  1751687 1929349 1648034184
