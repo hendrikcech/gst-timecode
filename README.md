@@ -57,3 +57,6 @@ export GST_PLUGIN_PATH="$(pwd)/builddir/"
 gst-inspect-1.0 timecodeoverlay
 gst-inspect-1.0 timecodeparse
 ```
+
+# License
+MIT
